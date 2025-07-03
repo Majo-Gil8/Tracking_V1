@@ -6,7 +6,7 @@ from scipy.optimize import linear_sum_assignment
 import matplotlib.pyplot as plt
 
 # Parameters
-video_file_name = 'video_phase_A3_N_40.avi'
+video_file_name = 'video_phase_RBC_M_40.avi'
 folder = r'D:\maria\Escritorio\Universidad\Maestria\Proyecto\Tracking\Simulation_Raul\videos'
 movie_full_path = os.path.join(folder, video_file_name)
 dxy = 3.75  # um
@@ -33,8 +33,8 @@ def detectar_centroides(frame_gray, pixel_size, diam_um):
     params = cv2.SimpleBlobDetector_Params()
     # Area filter
     params.filterByArea = True
-    params.minArea = 200
-    params.maxArea = 600
+    params.minArea = 600
+    #params.maxArea = 600
 
     #params.minThreshold = 40
     #params.maxThreshold = 200
@@ -44,11 +44,11 @@ def detectar_centroides(frame_gray, pixel_size, diam_um):
     params.minCircularity = 1.0  # 1.0 is perfect circle
 
     # elongación 
-    params.filterByInertia = False
+    params.filterByInertia = True
     params.filterByConvexity = False
 
     # depending on the video, you may need to adjust these parameters
-    params.filterByColor = True
+    params.filterByColor = False
     params.blobColor = 255  # 0 = oscuro, 255 = claro
 
     # Create detector
@@ -92,9 +92,9 @@ class KalmanFilter2D:
         self.H = np.array([[1, 0, 0, 0],
                            [0, 1, 0, 0]], dtype=np.float32)
 
-        self.P = np.eye(4, dtype=np.float32) * 500  # high initial uncertainty
-        self.Q = np.eye(4, dtype=np.float32) * 5  # small process noise
-        self.R = np.eye(2, dtype=np.float32) * 20    # measurement noise
+        self.P = np.eye(4, dtype=np.float32) * 100  # high initial uncertainty
+        self.Q = np.eye(4, dtype=np.float32) * 0.01  # small process noise
+        self.R = np.eye(2, dtype=np.float32) * 1    # measurement noise
 
     def predict(self):
         self.state = self.F @ self.state
@@ -116,6 +116,8 @@ kalman_filters = [KalmanFilter2D(x, y) for x, y in p0]
 # Save trajectories with positions estimated by Kalman
 trajectories = [ [kf.state[:2].copy()] for kf in kalman_filters ]
 detected_positions = [[kf.state[:2].copy()] for kf in kalman_filters]
+# Contador de cuadros sin detección
+skipped_counts = [0] * len(kalman_filters)
 
 # Main tracking loop
 while True:
@@ -137,6 +139,7 @@ while True:
         for i, kf in enumerate(kalman_filters):
             trajectories[i].append(kf.state[:2].copy())
             detected_positions[i].append(detected_positions[i][-1])
+            skipped_counts[i] += 1
         continue
 
     # Distance matrix between predictions and detections
@@ -145,26 +148,48 @@ while True:
     # Assign using Hungarian algorithm
     row_ind, col_ind = linear_sum_assignment(dist_matrix)
 
-    max_dist = 52  # pixels, adjust according to expected velocity
+    max_dist = 55  # pixels, adjust according to expected velocity
     assigned_pred = set()
     assigned_det = set()
 
     # Update Kalman with assigned detections
     for r, c in zip(row_ind, col_ind):
+        
         if dist_matrix[r, c] < max_dist:
             kalman_filters[r].update(p1[c])
             assigned_pred.add(r)
             assigned_det.add(c)
             detected_positions[r].append(p1[c].copy())
+            skipped_counts[r] = 0
         else:
             # If distance not met, prediction without update
             detected_positions[r].append(detected_positions[r][-1])
+            skipped_counts[r] += 1
 
     # For unassigned Kalman filters, only predict (without update)
     for i, kf in enumerate(kalman_filters):
         if i not in assigned_pred:
             detected_positions[i].append(detected_positions[i][-1])
+            skipped_counts[i] += 1
             # Already predicted above, just add the prediction as estimation
+
+    # Add new trackers for unassigned detections
+    nuevas_detecciones = [p1[i] for i in range(len(p1)) if i not in assigned_det]
+    for det in nuevas_detecciones:
+        new_kf = KalmanFilter2D(det[0], det[1])
+        kalman_filters.append(new_kf)
+        trajectories.append([det.copy()])
+        detected_positions.append([det.copy()])
+        skipped_counts.append(0)
+
+    # Remove trackers that skipped too long
+    max_skips = 10
+    for i in reversed(range(len(kalman_filters))):
+        if skipped_counts[i] > max_skips:
+            del kalman_filters[i]
+            del trajectories[i]
+            del detected_positions[i]
+            del skipped_counts[i]
 
     # Save updated positions in trajectories
     for i, kf in enumerate(kalman_filters):
@@ -196,7 +221,7 @@ cv2.destroyAllWindows()
 plt.figure(figsize=(8, 6))
 for i in range(len(detected_positions)):
     traj_det = np.array(detected_positions[i]) * pixel_size
-    plt.scatter(traj_det[:, 0], traj_det[:, 1], s=10, alpha=0.5, label=f'Detection {i}')
+    plt.plot(traj_det[:, 0], traj_det[:, 1], marker='o', markersize=3, alpha=0.5, label=f'Detection {i}')
 
 plt.gca().invert_yaxis()
 plt.xlabel('X (µm)')
